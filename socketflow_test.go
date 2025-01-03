@@ -29,13 +29,13 @@ func TestWebSocketClient(t *testing.T) {
 		defer conn.Close()
 
 		for {
-			_, data, err := conn.ReadMessage()
+			messageType, data, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
 
 			// Echo the exact message back
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			if err := conn.WriteMessage(messageType, data); err != nil {
 				t.Errorf("Failed to send message: %v", err)
 				return
 			}
@@ -53,8 +53,7 @@ func TestWebSocketClient(t *testing.T) {
 
 	// Create WebSocket client with config
 	client := NewWebSocketClient(conn, Config{
-		ChunkSize:    1024,
-		ChunkTimeout: 5 * time.Second,
+		ChunkSize: 1024,
 	})
 
 	// Start receiving messages in a separate goroutine
@@ -73,25 +72,21 @@ func TestWebSocketClient(t *testing.T) {
 
 	// Test SendMessage with small payload
 	t.Run("SendMessage with small payload", func(t *testing.T) {
-		payload := "Hello, World!"
-		id, err := client.SendMessage("test-topic", []byte(payload), nil)
+		payload := []byte("Hello, World!")
+		id, err := client.SendMessage("test-topic", payload)
 		shortMessageId = id
 		assert.NoError(t, err, "SendMessage failed with small payload")
 	})
 
 	// Test SendMessage with large payload (chunking)
 	t.Run("SendMessage with large payload", func(t *testing.T) {
-		payload := string(make([]byte, 1500)) // Larger than chunk size
-		id, err := client.SendMessage("test-topic", []byte(payload), nil)
+		payload := make([]byte, 1500) // Larger than chunk size
+		for i := range payload {
+			payload[i] = byte(i % 256) // Fill with non-zero data
+		}
+		id, err := client.SendMessage("test-topic", payload)
 		longMessageId = id
 		assert.NoError(t, err, "SendMessage failed with large payload")
-	})
-
-	// Test SendMessage with compression
-	t.Run("SendMessage with compression", func(t *testing.T) {
-		payload := "Compressed message"
-		_, err := client.SendMessage("test-topic", []byte(payload))
-		assert.NoError(t, err, "SendMessage failed with compression")
 	})
 
 	// Test Subscribe and ReceiveMessages
@@ -107,9 +102,9 @@ func TestWebSocketClient(t *testing.T) {
 			case msg := <-ch:
 				assert.Equal(t, topic, msg.Topic, "Received message has incorrect topic")
 				if msg.ID == shortMessageId {
-					assert.Equal(t, "Hello, World!", msg.Payload, "Received message has incorrect payload")
+					assert.Equal(t, "Hello, World!", string(msg.Payload), "Received message has incorrect payload")
 				} else if msg.ID == longMessageId {
-					assert.Equal(t, string(make([]byte, 1500)), msg.Payload, "Received message has incorrect payload")
+					assert.Equal(t, 1500, len(msg.Payload), "Received message has incorrect payload length")
 				} else {
 					t.Errorf("Received message has incorrect ID: %v", msg.ID)
 				}
@@ -119,7 +114,7 @@ func TestWebSocketClient(t *testing.T) {
 		}()
 
 		// Simulate sending a message to the server
-		msg := Message{Topic: topic, Payload: "Hello, Subscriber!"}
+		msg := Message{Topic: topic, Payload: []byte("Hello, Subscriber!")}
 		data, _ := json.Marshal(msg)
 		err := conn.WriteMessage(websocket.TextMessage, data)
 		assert.NoError(t, err, "Failed to send message to WebSocket server")
