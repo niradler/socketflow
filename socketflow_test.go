@@ -90,7 +90,7 @@ func TestWebSocketClient(t *testing.T) {
 	// Test SendMessage with compression
 	t.Run("SendMessage with compression", func(t *testing.T) {
 		payload := "Compressed message"
-		_, err := client.SendMessage("test-topic", []byte(payload), &SendOptions{Compress: true})
+		_, err := client.SendMessage("test-topic", []byte(payload))
 		assert.NoError(t, err, "SendMessage failed with compression")
 	})
 

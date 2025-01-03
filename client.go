@@ -2,7 +2,6 @@ package socketflow
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,7 +48,7 @@ func (client *WebSocketClient) SetSerializer(serializer Serializer) {
 	client.serializer = serializer
 }
 
-func (client *WebSocketClient) SendMessage(topic string, payload []byte, options *SendOptions) (string, error) {
+func (client *WebSocketClient) SendMessage(topic string, payload []byte) (string, error) {
 	id := generateMessageID()
 	start := time.Now()
 	defer func() {
@@ -63,29 +62,10 @@ func (client *WebSocketClient) SendMessage(topic string, payload []byte, options
 		client.sendMutex.Lock()
 		defer client.sendMutex.Unlock()
 
-		if options == nil {
-			options = &SendOptions{Compress: false}
-		}
-
-		var payloadBytes []byte
-		if options.Compress {
-			compressed, err := compressPayload(payload)
-			if err != nil {
-				return fmt.Errorf("failed to compress payload: %w", err)
-			}
-			payloadBytes = compressed
-		} else {
-			payloadBytes = payload
-		}
-
-		payloadStr := base64.StdEncoding.EncodeToString(payloadBytes)
-
 		message := &Message{
-			ID:         id,
-			Topic:      topic,
-			Payload:    payloadStr,
-			IsChunk:    false,
-			Compressed: options.Compress,
+			ID:      id,
+			Topic:   topic,
+			Payload: payload,
 		}
 
 		if len(message.Payload) > client.config.ChunkSize {
@@ -116,17 +96,17 @@ func (client *WebSocketClient) sendChunkedMessage(message *Message) error {
 			Topic:       message.Topic,
 			Payload:     message.Payload[start:end],
 			IsChunk:     true,
-			ChunkIndex:  i,
+			Chunk:       i + 1, // Start chunk index at 1
 			TotalChunks: totalChunks,
 		}
 
 		data, err := client.serializer.Marshal(chunk)
 		if err != nil {
-			return fmt.Errorf("failed to marshal chunk %d: %w", i, err)
+			return fmt.Errorf("failed to marshal chunk %d: %w", i+1, err)
 		}
 
-		if err := client.conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			return fmt.Errorf("failed to send chunk %d: %w", i, err)
+		if err := client.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			return fmt.Errorf("failed to send chunk %d: %w", i+1, err)
 		}
 	}
 
@@ -188,7 +168,7 @@ func (client *WebSocketClient) Unsubscribe(topic string) {
 
 func (client *WebSocketClient) ReceiveMessages() {
 	for {
-		_, data, err := client.conn.ReadMessage()
+		messageType, data, err := client.conn.ReadMessage()
 		if err != nil {
 			client.metrics.mu.Lock()
 			client.metrics.Errors++
@@ -202,27 +182,76 @@ func (client *WebSocketClient) ReceiveMessages() {
 			break
 		}
 
-		var message Message
-		if err := client.serializer.Unmarshal(data, &message); err != nil {
+		switch messageType {
+		case websocket.TextMessage:
+			var message Message
+			if err := client.serializer.Unmarshal(data, &message); err != nil {
+				client.metrics.mu.Lock()
+				client.metrics.Errors++
+				client.metrics.mu.Unlock()
+
+				client.clientStatusChan <- Status{
+					Type:    "error",
+					Message: "Failed to unmarshal message",
+					Error:   err,
+				}
+				continue
+			}
+
+			client.routeMessage(message)
+			client.metrics.mu.Lock()
+			client.metrics.MessagesReceived++
+			client.metrics.mu.Unlock()
+
+		case websocket.BinaryMessage:
+			var message Message
+			if err := client.serializer.Unmarshal(data, &message); err != nil {
+				client.metrics.mu.Lock()
+				client.metrics.Errors++
+				client.metrics.mu.Unlock()
+
+				client.clientStatusChan <- Status{
+					Type:    "error",
+					Message: "Failed to unmarshal binary message",
+					Error:   err,
+				}
+				continue
+			}
+
+			if message.IsChunk {
+				client.handleChunk(message)
+			} else {
+				client.routeMessage(message)
+				client.metrics.mu.Lock()
+				client.metrics.MessagesReceived++
+				client.metrics.mu.Unlock()
+			}
+
+		case websocket.CloseMessage:
+			client.clientStatusChan <- Status{
+				Type:    "close",
+				Message: "Connection closed",
+				Error:   errors.New("connection closed"),
+			}
+			break
+
+		case websocket.PingMessage:
+			log.Println("Received ping message")
+			client.conn.WriteMessage(websocket.PongMessage, nil)
+
+		case websocket.PongMessage:
+			log.Println("Received pong message")
+
+		default:
 			client.metrics.mu.Lock()
 			client.metrics.Errors++
 			client.metrics.mu.Unlock()
 
 			client.clientStatusChan <- Status{
 				Type:    "error",
-				Message: "Failed to unmarshal message",
-				Error:   err,
+				Message: "Unsupported message type",
+				Error:   fmt.Errorf("unsupported message type: %d", messageType),
 			}
-			continue
-		}
-
-		if message.IsChunk {
-			client.handleChunk(message)
-		} else {
-			client.routeMessage(message)
-			client.metrics.mu.Lock()
-			client.metrics.MessagesReceived++
-			client.metrics.mu.Unlock()
 		}
 	}
 }
@@ -234,13 +263,13 @@ func (client *WebSocketClient) handleChunk(message Message) {
 		client.chunkBuffer[message.ID] = chunks
 	}
 
-	if message.ChunkIndex < message.TotalChunks {
-		chunks[message.ChunkIndex] = &message
+	if message.Chunk <= message.TotalChunks {
+		chunks[message.Chunk-1] = &message // Adjust for 1-based indexing
 		client.chunkBuffer[message.ID] = chunks
 
 		allReceived := true
-		for _, chunk := range chunks {
-			if chunk == nil {
+		for _, c := range chunks {
+			if c == nil {
 				allReceived = false
 				break
 			}
@@ -271,65 +300,33 @@ func (client *WebSocketClient) handleChunk(message Message) {
 func (client *WebSocketClient) routeMessage(message Message) {
 	client.subscribeMutex.Lock()
 	defer client.subscribeMutex.Unlock()
-	log.Printf("routeMessage : ID=%s, Topic=%s, Payload=%s\n", message.ID, message.Topic, message.Payload)
-	payloadBytes, err := base64.StdEncoding.DecodeString(message.Payload)
-	if err != nil {
-		client.metrics.mu.Lock()
-		client.metrics.Errors++
-		client.metrics.mu.Unlock()
 
-		client.clientStatusChan <- Status{
-			Type:    "error",
-			Message: "Failed to decode Base64 payload",
-			Error:   err,
-		}
-		return
-	}
-
-	log.Printf("routeMessage before: ID=%s, Topic=%s, Payload=%s\n", message.ID, message.Topic, payloadBytes)
-	if message.Compressed {
-		decompressed, err := decompressPayload(payloadBytes)
-		if err != nil {
-			client.metrics.mu.Lock()
-			client.metrics.Errors++
-			client.metrics.mu.Unlock()
-
-			client.clientStatusChan <- Status{
-				Type:    "error",
-				Message: "Failed to decompress payload",
-				Error:   err,
-			}
-			return
-		}
-		payloadBytes = decompressed
-	}
-	log.Printf("routeMessage after: ID=%s, Topic=%s, Payload=%s\n", message.ID, message.Topic, payloadBytes)
 	if ch, exists := client.subscriptions[message.Topic]; exists {
 		ch <- &Message{
 			ID:      message.ID,
 			Topic:   message.Topic,
-			Payload: string(payloadBytes),
+			Payload: message.Payload,
 		}
 	} else {
 		log.Printf("No subscribers for topic: %s\n", message.Topic)
 	}
 }
 
-func (client *WebSocketClient) reassembleChunks(messageID string) (string, error) {
+func (client *WebSocketClient) reassembleChunks(messageID string) ([]byte, error) {
 	chunks, exists := client.chunkBuffer[messageID]
 	if !exists {
-		return "", errors.New("no chunks found for the given message ID")
+		return nil, errors.New("no chunks found for the given message ID")
 	}
 
 	var buffer bytes.Buffer
 	for _, chunk := range chunks {
 		if chunk == nil {
-			return "", errors.New("missing chunk in sequence")
+			return nil, errors.New("missing chunk in sequence")
 		}
-		buffer.WriteString(chunk.Payload)
+		buffer.Write(chunk.Payload)
 	}
 
-	return buffer.String(), nil
+	return buffer.Bytes(), nil
 }
 
 func (client *WebSocketClient) Close() error {
@@ -367,6 +364,11 @@ func (client *WebSocketClient) StartHeartbeat(interval time.Duration) {
 			select {
 			case <-ticker.C:
 				if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					client.clientStatusChan <- Status{
+						Type:    "error",
+						Message: "Failed to send ping message",
+						Error:   err,
+					}
 					return
 				}
 			}

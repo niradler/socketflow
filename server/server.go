@@ -3,14 +3,14 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/niradler/socketflow"
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:       func(r *http.Request) bool { return true },
+	EnableCompression: true,
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -20,15 +20,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	conn.EnableWriteCompression(true)
 	client := socketflow.NewWebSocketClient(conn, socketflow.Config{
-		ChunkSize:    1024,
-		ChunkTimeout: 5 * time.Second,
+		ChunkSize: 1024,
 	})
 
 	ch := client.Subscribe("test-topic")
 	go func() {
 		for msg := range ch {
-			log.Printf("Received message: ID=%s, Topic=%s, Payload=%s\n", msg.ID, msg.Topic, msg.Payload)
+			log.Printf("Received topic message: ID=%s, Topic=%s, PayloadLen=%v\n", msg.ID, msg.Topic, len(msg.Payload))
+			log.Println("Payload:", string(msg.Payload))
 		}
 	}()
 
