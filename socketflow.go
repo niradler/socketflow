@@ -10,11 +10,10 @@ import (
 type Message struct {
 	ID          string `json:"id"`
 	Topic       string `json:"topic"`
-	Payload     string `json:"payload"`
+	Payload     []byte `json:"payload"`
 	IsChunk     bool   `json:"isChunk"`
-	ChunkIndex  int    `json:"chunkIndex"`
+	Chunk       int    `json:"chunkIndex"`
 	TotalChunks int    `json:"totalChunks"`
-	Compressed  bool   `json:"compressed"`
 }
 
 type RetryConfig struct {
@@ -37,10 +36,6 @@ type Status struct {
 	Error   error
 }
 
-type SendOptions struct {
-	Compress bool
-}
-
 type Metrics struct {
 	MessagesSent     int
 	MessagesReceived int
@@ -53,6 +48,7 @@ func NewWebSocketClient(conn *websocket.Conn, config Config) *WebSocketClient {
 	if config.RetryConfig.MaxRetries == 0 {
 		config.RetryConfig = DefaultRetryConfig
 	}
+
 	return &WebSocketClient{
 		conn:             conn,
 		chunkBuffer:      make(map[string][]*Message),

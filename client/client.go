@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"time"
 
@@ -18,40 +19,37 @@ func main() {
 
 	// Create a new WebSocket client
 	client := socketflow.NewWebSocketClient(conn, socketflow.Config{
-		ChunkSize:    1024,
-		ChunkTimeout: 5 * time.Second,
+		ChunkSize: 1024,
 	})
 
+	conn.EnableWriteCompression(true)
 	// Subscribe to status updates
 	statusChan := client.SubscribeToStatus()
 	go func() {
 		for status := range statusChan {
-			switch status.Type {
-			case "error":
-				log.Printf("Error: %v\n", status.Error)
-			case "retry":
-				log.Printf("Retrying: %v\n", status.Message)
-			}
+			log.Printf("Received status: %v\n", status)
 		}
 	}()
 
 	// Start tracking metrics
-	// client.TrackMetrics()
+	client.TrackMetrics(time.Minute * 1)
+	client.StartHeartbeat(time.Second * 15)
 
-	// Send a small message without compression
-	id, err := client.SendMessage("test-topic", []byte("Hello, World!"), nil)
+	// Send a small message
+	id, err := client.SendMessage("test-topic", []byte("Hello, World!"))
 	if err != nil {
 		log.Fatal("Failed to send message:", err)
 	}
 	log.Printf("Sent small message with ID: %s\n", id)
 
-	// Send a large message with compression
-	largePayload := string(make([]byte, 1500)) // Larger than chunk size
-	id, err = client.SendMessage("test-topic", []byte(largePayload), &socketflow.SendOptions{Compress: true})
+	// Send a large message
+	pattern := []byte("abcd")
+	largePayload := bytes.Repeat(pattern, 1500/len(pattern))
+	id, err = client.SendMessage("test-topic", []byte(largePayload))
 	if err != nil {
 		log.Fatal("Failed to send message:", err)
 	}
-	log.Printf("Sent large compressed message with ID: %s\n", id)
+	log.Printf("Sent large message with ID: %s\n", id)
 
 	// Subscribe to a topic
 	ch := client.Subscribe("test-topic")
