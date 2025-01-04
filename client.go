@@ -48,6 +48,10 @@ func (client *WebSocketClient) SetSerializer(serializer Serializer) {
 	client.serializer = serializer
 }
 
+func (client *WebSocketClient) SetReassembleChunks(reassemble bool) {
+	client.config.ReassembleChunks = reassemble
+}
+
 func (client *WebSocketClient) SendMessage(topic string, payload []byte) (string, error) {
 	id := generateMessageID()
 	start := time.Now()
@@ -257,43 +261,49 @@ func (client *WebSocketClient) ReceiveMessages() {
 }
 
 func (client *WebSocketClient) handleChunk(message Message) {
-	chunks, exists := client.chunkBuffer[message.ID]
-	if !exists {
-		chunks = make([]*Message, message.TotalChunks)
-		client.chunkBuffer[message.ID] = chunks
-	}
-
-	if message.Chunk <= message.TotalChunks {
-		chunks[message.Chunk-1] = &message // Adjust for 1-based indexing
-		client.chunkBuffer[message.ID] = chunks
-
-		allReceived := true
-		for _, c := range chunks {
-			if c == nil {
-				allReceived = false
-				break
-			}
+	if client.config.ReassembleChunks {
+		// Reassemble full message
+		chunks, exists := client.chunkBuffer[message.ID]
+		if !exists {
+			chunks = make([]*Message, message.TotalChunks)
+			client.chunkBuffer[message.ID] = chunks
 		}
 
-		if allReceived {
-			reassembledPayload, err := client.reassembleChunks(message.ID)
-			if err != nil {
-				client.metrics.mu.Lock()
-				client.metrics.Errors++
-				client.metrics.mu.Unlock()
+		if message.Chunk <= message.TotalChunks {
+			chunks[message.Chunk-1] = &message // Adjust for 1-based indexing
+			client.chunkBuffer[message.ID] = chunks
+
+			allReceived := true
+			for _, c := range chunks {
+				if c == nil {
+					allReceived = false
+					break
+				}
+			}
+
+			if allReceived {
+				reassembledPayload, err := client.reassembleChunks(message.ID)
+				if err != nil {
+					client.metrics.mu.Lock()
+					client.metrics.Errors++
+					client.metrics.mu.Unlock()
+					delete(client.chunkBuffer, message.ID)
+					return
+				}
+
+				reassembledMessage := &Message{
+					ID:      message.ID,
+					Topic:   message.Topic,
+					Payload: reassembledPayload,
+				}
+
+				client.routeMessage(*reassembledMessage)
 				delete(client.chunkBuffer, message.ID)
-				return
 			}
-
-			reassembledMessage := &Message{
-				ID:      message.ID,
-				Topic:   message.Topic,
-				Payload: reassembledPayload,
-			}
-
-			client.routeMessage(*reassembledMessage)
-			delete(client.chunkBuffer, message.ID)
 		}
+	} else {
+		// Stream chunks directly
+		client.routeMessage(message)
 	}
 }
 
@@ -302,11 +312,7 @@ func (client *WebSocketClient) routeMessage(message Message) {
 	defer client.subscribeMutex.Unlock()
 
 	if ch, exists := client.subscriptions[message.Topic]; exists {
-		ch <- &Message{
-			ID:      message.ID,
-			Topic:   message.Topic,
-			Payload: message.Payload,
-		}
+		ch <- &message
 	} else {
 		log.Printf("No subscribers for topic: %s\n", message.Topic)
 	}

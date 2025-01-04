@@ -53,7 +53,8 @@ func TestWebSocketClient(t *testing.T) {
 
 	// Create WebSocket client with config
 	client := NewWebSocketClient(conn, Config{
-		ChunkSize: 1024,
+		ChunkSize:        1024,
+		ReassembleChunks: true,
 	})
 
 	// Start receiving messages in a separate goroutine

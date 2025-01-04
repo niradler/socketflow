@@ -55,7 +55,8 @@ func main() {
 	ch := client.Subscribe("test-topic")
 	go func() {
 		for msg := range ch {
-			log.Printf("Received message: ID=%s, Topic=%s, Payload=%s\n", msg.ID, msg.Topic, msg.Payload)
+			log.Printf("Received topic message: ID=%s, Topic=%s, IsChunk=%v, Chunk=%d, TotalChunks=%d, PayloadLen=%v\n", msg.ID, msg.Topic, msg.IsChunk, msg.Chunk, msg.TotalChunks, len(msg.Payload))
+			log.Println("Payload:", string(msg.Payload))
 		}
 	}()
 
