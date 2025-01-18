@@ -11,9 +11,15 @@ import (
 
 func main() {
 	// Connect to the WebSocket server
-	conn, _, err := websocket.DefaultDialer.Dial("ws://localhost:8080/ws", nil)
-	if err != nil {
-		log.Fatal("Failed to connect to WebSocket server:", err)
+	var conn *websocket.Conn
+	var err error
+	for {
+		conn, _, err = websocket.DefaultDialer.Dial("ws://localhost:8080/ws", nil)
+		if err == nil {
+			break
+		}
+		log.Println("Failed to connect to WebSocket server, retrying in 3 seconds:", err)
+		time.Sleep(3 * time.Second)
 	}
 	defer conn.Close()
 

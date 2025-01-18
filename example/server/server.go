@@ -22,7 +22,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn.EnableWriteCompression(true)
 	client := socketflow.NewWebSocketClient(conn, socketflow.Config{
-		ChunkSize: 1024,
+		ChunkSize:        1024,
+		ReassembleChunks: false,
 	})
 
 	ch := client.Subscribe("test-topic")
