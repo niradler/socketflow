@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"time"
 
@@ -56,7 +57,7 @@ func main() {
 		log.Fatal("Failed to send message:", err)
 	}
 	log.Printf("Sent large message with ID: %s\n", id)
-
+	client.StreamMessages("test-topic", io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("Stream"), 1500/len("Stream")))))
 	// Subscribe to a topic
 	ch := client.Subscribe("test-topic")
 	go func() {

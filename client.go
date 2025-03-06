@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"sync"
@@ -52,8 +53,7 @@ func (client *WebSocketClient) SetReassembleChunks(reassemble bool) {
 	client.config.ReassembleChunks = reassemble
 }
 
-func (client *WebSocketClient) SendMessage(topic string, payload []byte) (string, error) {
-	id := generateMessageID()
+func (client *WebSocketClient) Send(message Message, messageType int) error {
 	start := time.Now()
 	defer func() {
 		client.metrics.mu.Lock()
@@ -62,30 +62,71 @@ func (client *WebSocketClient) SendMessage(topic string, payload []byte) (string
 		client.metrics.mu.Unlock()
 	}()
 
-	return id, client.retry(func() error {
+	return client.retry(func() error {
 		client.sendMutex.Lock()
 		defer client.sendMutex.Unlock()
-
-		message := &Message{
-			ID:      id,
-			Topic:   topic,
-			Payload: payload,
-		}
-
-		if len(message.Payload) > client.config.ChunkSize {
-			return client.sendChunkedMessage(message)
-		}
 
 		data, err := client.serializer.Marshal(message)
 		if err != nil {
 			return fmt.Errorf("failed to marshal message: %w", err)
 		}
 
-		return client.conn.WriteMessage(websocket.TextMessage, data)
+		return client.conn.WriteMessage(messageType, data)
 	})
 }
 
-func (client *WebSocketClient) sendChunkedMessage(message *Message) error {
+func (client *WebSocketClient) StreamMessages(topic string, s io.ReadCloser) error {
+
+	buf := make([]byte, client.config.ChunkSize)
+	counter := 1
+	id := generateMessageID()
+	for {
+		n, err := s.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+
+		ended := n == 0
+		totalChunks := counter
+		if !ended {
+			totalChunks++
+		}
+		message := &Message{
+			ID:          id,
+			Topic:       topic,
+			Payload:     buf,
+			IsChunk:     true,
+			Chunk:       counter,
+			TotalChunks: totalChunks,
+		}
+
+		client.Send(*message, websocket.BinaryMessage)
+
+		if ended {
+			break
+		}
+		counter++
+	}
+
+	return nil
+}
+
+func (client *WebSocketClient) SendMessage(topic string, payload []byte) (string, error) {
+	id := generateMessageID()
+	message := &Message{
+		ID:      id,
+		Topic:   topic,
+		Payload: payload,
+	}
+
+	if len(message.Payload) > client.config.ChunkSize {
+		return "", client.chunkedMessages(message)
+	}
+
+	return id, client.Send(*message, websocket.TextMessage)
+}
+
+func (client *WebSocketClient) chunkedMessages(message *Message) error {
 	totalChunks := (len(message.Payload) + client.config.ChunkSize - 1) / client.config.ChunkSize
 
 	for i := 0; i < totalChunks; i++ {
@@ -104,14 +145,7 @@ func (client *WebSocketClient) sendChunkedMessage(message *Message) error {
 			TotalChunks: totalChunks,
 		}
 
-		data, err := client.serializer.Marshal(chunk)
-		if err != nil {
-			return fmt.Errorf("failed to marshal chunk %d: %w", i+1, err)
-		}
-
-		if err := client.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-			return fmt.Errorf("failed to send chunk %d: %w", i+1, err)
-		}
+		client.Send(*chunk, websocket.BinaryMessage)
 	}
 
 	return nil
